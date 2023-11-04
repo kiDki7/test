@@ -1,0 +1,597 @@
+import tkinter as tk
+from tkinter import ttk, Menu
+import datetime
+import json
+import random
+import os
+import subprocess
+from tkinter import messagebox
+import tempfile
+from PIL import ImageGrab
+from PIL import Image
+import win32print
+import win32api
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.pdfgen import canvas
+from reportlab.lib import colors
+
+class MitarbeiterApp:
+    CM_TO_PX_CONVERSION = 37.795275591
+    ROW_HEIGHTS_CM = [0.51] + [0.83] * 21
+    COLUMN_WIDTHS_CM = [0.97, 1.48, 2.71, 2.71, 2.71, 2.71, 4.09, 3.07, 5.95]
+
+    @staticmethod
+    def cm_to_px(cm):
+        return cm * MitarbeiterApp.CM_TO_PX_CONVERSION
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Mitarbeiter Dienstplan")
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+        self.create_top_menu()
+        self.create_tabs()
+
+        self.create_dienstplan_tab()
+
+        self.day_entries = {day: [] for day in ["Mo", "Di", "Mi", "Do", "Fr"]}
+        self.day_entries['Priority'] = []
+        self.create_mitarbeiter_tab()
+        self.load_data()
+       
+
+
+    def create_top_menu(self):
+        # Erstellt das obere Menü.
+        self.menu = tk.Menu(self.root)
+        self.root.config(menu=self.menu)
+        self.file_menu = tk.Menu(self.menu)
+        self.menu.add_cascade(label="Datei", menu=self.file_menu)
+        self.file_menu.add_command(label="Speichern", command=self.save_data)
+        self.file_menu.add_command(label="Laden", command=self.load_data)
+        self.file_menu.add_command(label="Beenden", command=self.root.quit)
+        self.edit_menu = tk.Menu(self.menu)
+        self.menu.add_cascade(label="Bearbeiten", menu=self.edit_menu)
+        self.edit_menu.add_command(label="Rückgängig", command=self.do_nothing)
+        self.edit_menu.add_command(label="Als PDF exportieren", command=self.export_to_pdf)
+        self.edit_menu = tk.Menu(self.menu)
+        self.menu.add_cascade(label="About", menu=self.edit_menu)
+        self.edit_menu.add_command(label="Copyright 2023", command=self.do_nothing)
+        self.edit_menu.add_command(label="André Kraft, Darmstadt", command=self.do_nothing)
+
+
+    def create_tabs(self):
+        # Erstellt die Haupt-Tabs der Anwendung.
+        
+        self.tab_parent = ttk.Notebook(self.root)
+        self.mitarbeiter_tab = ttk.Frame(self.tab_parent)
+        self.dienstplan_tab = ttk.Frame(self.tab_parent)
+        self.tab_parent.add(self.mitarbeiter_tab, text="Mitarbeiter")
+        self.tab_parent.add(self.dienstplan_tab, text="Dienstplan")
+        self.tab_parent.grid(sticky='nsew') 
+        
+        # Diese Zeile aufrufen, um den Dienstplan-Canvas zu erstellen
+        self.create_dienstplan_canvas()
+
+
+    def create_dienstplan_canvas(self):
+        # Erstellt den Dienstplan auf einem Canvas-Widget.
+        
+        self.dienstplan_canvas = tk.Canvas(self.dienstplan_tab, bg="white", width=1000, height=1000)
+        self.dienstplan_canvas.grid(row=0, column=0, columnspan=len(self.COLUMN_WIDTHS_CM), sticky='nsew')
+
+        # Titel "DIENSTPLAN" hinzufügen
+        title_x = self.cm_to_px(sum(self.COLUMN_WIDTHS_CM) / 2)
+        title_y = self.cm_to_px(self.ROW_HEIGHTS_CM[0] / 2)
+        self.dienstplan_canvas.create_text(title_x, title_y, text="DIENSTPLAN", font=("Arial", 20, "bold"))
+
+        # Zeichnet die vertikalen Linien
+        x_pos = 0
+        for idx, width_cm in enumerate(self.COLUMN_WIDTHS_CM):
+            x_pos += self.cm_to_px(width_cm)
+            line_width = 2 if idx in [1, 7] else 1
+            start_y = self.cm_to_px(self.ROW_HEIGHTS_CM[0]) * 2.6 if idx == 0 else self.cm_to_px(self.ROW_HEIGHTS_CM[0])
+            self.dienstplan_canvas.create_line(x_pos, start_y, x_pos, self.cm_to_px(sum(self.ROW_HEIGHTS_CM)), fill="black", width=line_width)
+    
+        # Zeichnet die horizontalen Linien
+        y_pos = self.cm_to_px(self.ROW_HEIGHTS_CM[0])
+        for idx, height_cm in enumerate(self.ROW_HEIGHTS_CM[1:]):
+            y_pos += self.cm_to_px(height_cm)
+            line_width = 2 if idx+1 in [1, 6, 11, 16, 21] else 1
+            
+            # Standardmäßig gehen Linien über die gesamte Breite
+            end_x_full = self.cm_to_px(sum(self.COLUMN_WIDTHS_CM))
+            
+            # Linien, die in der Frühdienstspalte (Spalte 6) enden
+            if idx+1 in [2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 14, 15, 17, 18, 19, 20]:
+                end_x_partial = self.cm_to_px(sum(self.COLUMN_WIDTHS_CM[:6]))
+                start_x_next = self.cm_to_px(sum(self.COLUMN_WIDTHS_CM[:7]))
+                self.dienstplan_canvas.create_line(0, y_pos, end_x_partial, y_pos, fill="black", width=line_width)
+                self.dienstplan_canvas.create_line(start_x_next, y_pos, end_x_full, y_pos, fill="black", width=line_width)
+            else:
+                self.dienstplan_canvas.create_line(0, y_pos, end_x_full, y_pos, fill="black", width=line_width)
+
+        # Fenstergröße basierend auf den gegebenen Abmessungen anpassen
+        total_width_px = self.cm_to_px(sum(self.COLUMN_WIDTHS_CM))
+        total_height_px = self.cm_to_px(sum(self.ROW_HEIGHTS_CM))
+        self.root.geometry(f"{int(total_width_px)}x{int(total_height_px)}")
+
+        # Canvas-Größe anpassen
+        self.dienstplan_canvas.config(scrollregion=self.dienstplan_canvas.bbox("all"))
+
+        self.dienstplan_tab.grid_rowconfigure(0, weight=1)
+        self.dienstplan_tab.grid_columnconfigure(0, weight=1)
+
+        wochentage = ["MO", "DI", "MI", "DO", "FR"]
+        y_pos = self.cm_to_px(sum(self.ROW_HEIGHTS_CM[:2]))  # Start 2 Zeilen nach dem Header
+
+        for _ in range(4):  # Wiederhole 4 Mal
+            for idx, tag in enumerate(wochentage):
+                y_pos += self.cm_to_px(self.ROW_HEIGHTS_CM[idx + 2])  # +2, um den Header und die erste leere Zeile zu überspringen
+                self.dienstplan_canvas.create_text(self.cm_to_px(self.COLUMN_WIDTHS_CM[0]) / 2, y_pos - (self.cm_to_px(self.ROW_HEIGHTS_CM[idx + 2]) / 2), 
+                                                text=tag, font=("Arial", 10, "bold"))
+                
+        # Beschriftungen für Zeile 2 hinzufügen
+        headers = ["", "", "16:00", "16:00", "17:00", "17:00", "Frühdienst", "Schlafen", "Termine"]
+        for col_idx, header in enumerate(headers):
+            x_pos = self.cm_to_px(sum(self.COLUMN_WIDTHS_CM[:col_idx]))
+            y_pos = self.cm_to_px(sum(self.ROW_HEIGHTS_CM[:2]))
+            
+            self.dienstplan_canvas.create_text(x_pos + (self.cm_to_px(self.COLUMN_WIDTHS_CM[col_idx]) / 2), 
+                                            y_pos - (self.cm_to_px(self.ROW_HEIGHTS_CM[2]) / 2), 
+                                            text=header, font=("Arial", 10, "bold"))
+
+    def do_nothing(self):
+        pass
+
+   
+ 
+    def create_mitarbeiter_tab(self):
+        # Erstellt den Mitarbeiter-Tab.
+
+        # Stichtag Label und Eingabe
+        ttk.Label(self.mitarbeiter_tab, text="Stichtag:").grid(row=0, column=0, padx=10, pady=10)
+        self.stichtag_entry = ttk.Entry(self.mitarbeiter_tab)
+        self.stichtag_entry.grid(row=0, column=1, padx=10, pady=10)
+
+        # Stichtag "Übernehmen" Button
+        self.stichtag_apply_button = ttk.Button(self.mitarbeiter_tab, text="Stichtag übernehmen", command=self.update_stichtag_in_dienstplan)
+        self.stichtag_apply_button.grid(row=0, column=2, padx=10, pady=10)
+
+        # Legende hinzufügen
+        ttk.Label(self.mitarbeiter_tab, text="Legende: G: Ganztags, NM: Nachmittags, VM: Vormittags, NA: Nicht anwesend").grid(row=1, column=0, columnspan=5, pady=10)
+
+        # Überschriften / Headers
+        headers = ["Name / Priorität", "Mo", "Di", "Mi", "Do", "Fr"]
+        for idx, header in enumerate(headers):
+            ttk.Label(self.mitarbeiter_tab, text=header, font=("Arial", 10, "bold")).grid(row=2, column=idx, padx=10, pady=10)
+
+        # Buttons zum Hinzufügen und Entfernen von Zeilen
+        
+        self.fill_plan_button = ttk.Button(self.mitarbeiter_tab, text="Dienstplan füllen", command=self.fill_dienstplan)
+        self.fill_plan_button.grid(row=0, column=3, padx=10, pady=10)
+        
+        self.add_row_button = ttk.Button(self.mitarbeiter_tab, text="Zeile hinzufügen", command=self.add_mitarbeiter_row)
+        self.add_row_button.grid(row=0, column=4, padx=10, pady=10)
+        
+        self.remove_row_button = ttk.Button(self.mitarbeiter_tab, text="Zeile entfernen", command=self.remove_mitarbeiter_row)
+        self.remove_row_button.grid(row=0, column=5, padx=10, pady=10)
+
+        # Initialisiere Listen für Eingabefelder
+        self.name_entries = []
+        self.day_entries = {day: [] for day in ["Mo", "Di", "Mi", "Do", "Fr"]}
+        self.day_entries['Priority'] = []
+
+        # Erstelle anfangs 5 Zeilen für die Mitarbeiterdaten
+        for _ in range(5):
+            self.add_mitarbeiter_row()
+
+        for i in range(6):  # Für 6 Spalten (Name, Mo, Di, Mi, Do, Fr)
+            self.mitarbeiter_tab.grid_columnconfigure(i, weight=1)
+
+        # Setzen Sie die Spaltenbreite für die Comboboxen der Wochentage
+        self.mitarbeiter_tab.grid_columnconfigure(2, minsize=50)  # Montag
+        self.mitarbeiter_tab.grid_columnconfigure(3, minsize=50)  # Dienstag
+        self.mitarbeiter_tab.grid_columnconfigure(4, minsize=50)  # Mittwoch
+        self.mitarbeiter_tab.grid_columnconfigure(5, minsize=50)  # Donnerstag
+        self.mitarbeiter_tab.grid_columnconfigure(6, minsize=50)  # Freitag
+
+        entry = ttk.Combobox(self.mitarbeiter_tab, values=["G", "NM", "VM", "NA"], state="readonly", width=3)
+
+
+
+    def change_combobox_color(self, event):
+        widget = event.widget
+        value = widget.get()
+        if value == "G":
+            widget.config(bg="green")
+        elif value == "NM":
+            widget.config(bg="lightgreen")
+        elif value == "VM":
+            widget.config(bg="yellow")
+        elif value == "NA":
+            widget.config(bg="red")
+
+
+    
+    def update_stichtag_in_dienstplan(self):
+        # Das eingegebene Stichtag-Datum holen
+        stichtag = self.stichtag_entry.get()
+
+        # Versuchen, das eingegebene Datum in ein Python-Datumsobjekt umzuwandeln
+        try:
+            current_date = datetime.datetime.strptime(stichtag, '%d.%m.%Y').date()
+        except ValueError:
+            messagebox.showerror("Fehler", "Bitte geben Sie das Datum im Format 'dd.mm.yyyy' ein.")
+            return
+
+        # Löscht alle vorhandenen 'stichtag_text' Elemente
+        self.dienstplan_canvas.delete("stichtag_text")
+
+        # Erzwingt die Aktualisierung des Canvas, um das Löschen der Textelemente sofort anzuzeigen
+        self.dienstplan_canvas.update()
+
+        weekdays = ["Mo", "Di", "Mi", "Do", "Fr"]
+
+        # Für jede der vier Wochen
+        for week in range(4):
+            for day in weekdays:
+                row_offset = week * 5
+                day_to_row = {"Mo": 2, "Di": 3, "Mi": 4, "Do": 5, "Fr": 6}
+                row = day_to_row[day] + row_offset
+
+                x_pos = self.cm_to_px(sum(self.COLUMN_WIDTHS_CM[:1])) + (self.cm_to_px(self.COLUMN_WIDTHS_CM[1]) * 0.5)  # 20% der Spaltenbreite nach rechts
+                y_pos = self.cm_to_px(sum(self.ROW_HEIGHTS_CM[:row + 1])) - self.cm_to_px(self.ROW_HEIGHTS_CM[row] / 2)
+
+                # Erstellen des Texts mit einem eindeutigen Tag "stichtag_text"
+                self.dienstplan_canvas.create_text(x_pos, y_pos, text=current_date.strftime('%d.%m.'), font=("Arial", 10), tags=("stichtag_text"))
+
+                # Das Datum um einen Tag erhöhen
+                current_date += datetime.timedelta(days=1)
+
+            # Am Wochenende (Samstag und Sonntag) das Datum um zwei Tage erhöhen
+            current_date += datetime.timedelta(days=2)
+
+
+
+
+ 
+    def add_mitarbeiter_row(self):
+        row_num = len(self.name_entries) + 3
+
+        # Eingabefeld für den Namen
+        name_entry = ttk.Entry(self.mitarbeiter_tab)
+        name_entry.grid(row=row_num, column=0, padx=8, pady=10)
+        self.name_entries.append(name_entry)
+
+        # Eingabefeld für die Priorität
+        priority_entry = ttk.Combobox(self.mitarbeiter_tab, values=[0, 1, 2, 3], state="readonly", width=2)
+        priority_entry.grid(row=row_num, column=0, padx=5, pady=5, sticky='e')
+        priority_entry.current(0)  # Diese Zeile wurde hinzugefügt
+        self.day_entries['Priority'].append(priority_entry)
+
+        # Eingabefelder für die Wochentage (Start jetzt bei column=2)
+        for idx, day in enumerate(["Mo", "Di", "Mi", "Do", "Fr"]):
+            entry = ttk.Combobox(self.mitarbeiter_tab, values=["G", "NM", "VM", "NA"], state="readonly", width=3)
+            entry.grid(row=row_num, column=idx+1, padx=2, pady=3)  # Start bei column=2
+            entry.bind("<<ComboboxSelected>>", self.change_combobox_color)
+            self.day_entries[day].append(entry)
+
+
+    def remove_mitarbeiter_row(self):
+        if self.name_entries:
+            self.name_entries[-1].destroy()
+            self.name_entries.pop()
+
+            for day in ["Mo", "Di", "Mi", "Do", "Fr"]:
+                self.day_entries[day][-1].destroy()
+                self.day_entries[day].pop()
+
+            # Entfernen des letzten Prioritätseintrags
+            self.day_entries['Priority'][-1].destroy()
+            self.day_entries['Priority'].pop()
+
+
+
+
+    def create_dienstplan_tab(self):
+        # Erstellt den Dienstplan-Tab.
+    
+        # Initialisiere Listen für Labels
+        self.plan_labels = {day: [] for day in ["Name", "Mo", "Di", "Mi", "Do", "Fr"]}
+
+        # Erstelle anfangs 5 Zeilen für den Dienstplan (diese können später basierend auf den Eingaben im Mitarbeiter-Tab angepasst werden)
+        for _ in range(5):
+            self.add_dienstplan_row()
+
+
+
+    def add_dienstplan_row(self):
+        # Fügt eine neue Zeile für die Anzeige des Dienstplans hinzu.# 
+        row_num = len(self.plan_labels["Name"]) + 1  # +1, um den Header zu berücksichtigen
+
+        # Label für den Namen
+        name_label = ttk.Label(self.dienstplan_tab, text="")
+        name_label.grid(row=row_num, column=0, padx=10, pady=5)
+        self.plan_labels["Name"].append(name_label)
+
+        # Labels für die Wochentage
+        for idx, day in enumerate(["Mo", "Di", "Mi", "Do", "Fr"]):
+            label = ttk.Label(self.dienstplan_tab, text="")
+            label.grid(row=row_num, column=idx+1, padx=10, pady=5)
+            self.plan_labels[day].append(label)
+
+
+
+    def fill_dienstplan(self):
+        # Löscht alle Canvas-Textelemente mit dem Tag "employee_text"
+        self.dienstplan_canvas.delete("employee_text")
+
+        # Initialisierung eines Dictionaries für die Verfügbarkeiten
+        availability = {day: [] for day in ["Mo", "Di", "Mi", "Do", "Fr"]}
+
+        # Definieren Sie priority_dict hier, nicht innerhalb des for-Loops
+        priority_dict = {}
+        for idx, name_entry in enumerate(self.name_entries):
+            try:
+                priority_dict[name_entry.get()] = int(self.day_entries['Priority'][idx].get())
+            except ValueError:
+                priority_dict[name_entry.get()] = 0  # Standardwert, falls die Umwandlung fehlschlägt
+
+        # Durchlauf der Mitarbeiter und Erfassung ihrer Verfügbarkeiten
+        for idx, name_entry in enumerate(self.name_entries):
+            name = name_entry.get()
+            for day in ["Mo", "Di", "Mi", "Do", "Fr"]:
+                if self.day_entries[day][idx].get() in ["G", "NM"]:
+                    availability[day].append(name)
+
+        # Dienstverteilung für jede der vier Wochen
+        for week in range(4):
+            # Liste der bereits eingeteilten Mitarbeiter für jeden Tag zurücksetzen
+            already_scheduled = {day: [] for day in ["Mo", "Di", "Mi", "Do", "Fr"]}
+            for day, available_names in availability.items():
+                # Entferne bereits eingeteilte Mitarbeiter aus der Liste der verfügbaren Mitarbeiter
+                available_names = [name for name in available_names if name not in already_scheduled[day]]
+        
+                # Sortierung der Namen nach Priorität
+                available_names = sorted(available_names, key=lambda x: priority_dict.get(x, 0), reverse=True)
+
+                # Zufälliges Mischen der Namen für Fairness
+                random.shuffle(available_names)
+                available_names_copy = available_names.copy()  # Kopie der Liste, um sie wiederzuverwenden
+
+                # Berechnung der Zeilenposition basierend auf der Woche und dem Wochentag
+                row_offset = week * 5
+                day_to_row = {"Mo": 2, "Di": 3, "Mi": 4, "Do": 5, "Fr": 6}
+                row = day_to_row[day] + row_offset
+
+                # Verteilung der 16:00 und 17:00 Uhr Dienste
+                for col in [2, 3, 4, 5]:
+                    if available_names:  # Überprüfung, ob noch Namen vorhanden sind
+                        employee = [name for name in available_names if name not in already_scheduled[day]]
+                        if not employee:  # Wenn alle verfügbaren Namen bereits eingeteilt sind
+                            break
+                        employee = employee[0]  # Der erste verfügbare Mitarbeiter, der noch nicht eingeteilt ist
+                        already_scheduled[day].append(employee)  # Fügen Sie den eingeteilten Mitarbeiter zur Liste hinzu
+                        available_names.remove(employee)  # Entfernen des eingeteilten Mitarbeiters aus der Liste der verfügbaren Namen
+                        x_pos = self.cm_to_px(sum(self.COLUMN_WIDTHS_CM[:col])) + (self.cm_to_px(self.COLUMN_WIDTHS_CM[col]) / 2)
+                        y_pos = self.cm_to_px(sum(self.ROW_HEIGHTS_CM[:row + 1])) - (self.cm_to_px(self.ROW_HEIGHTS_CM[row]) / 2)
+                        self.dienstplan_canvas.create_text(x_pos, y_pos, text=employee, font=("Arial", 10), tags=("employee_text"))
+
+                # Füge den eingeteilten Mitarbeiter zur Liste der bereits eingeteilten Mitarbeiter hinzu
+                already_scheduled[day].append(employee)
+
+
+                # Spaltenindex für die "Schlafen" Spalte
+                schlafen_col_index = 7  # Angenommen, die "Schlafen" Spalte ist die 8. Spalte (beginnend mit Index 0)
+
+                for day in ["Mo", "Di", "Mi", "Do", "Fr"]:
+                    # Mitarbeiter mit Priorität 0 und Verfügbarkeit G oder NM für Schlafendienste
+                    schlafen_candidates = [name for name, priority in priority_dict.items() if priority == 0 and name in availability[day]]
+                    
+                    # Zufälliges Mischen der Kandidaten für die Schlafendienste für Fairness
+                    random.shuffle(schlafen_candidates)
+                    
+                    # Dienstverteilung für jede der vier Wochen
+                    for week in range(4):
+                        # Berechnung der Zeilenposition basierend auf der Woche
+                        row_offset = week * 5
+                        day_to_row = {"Mo": 2, "Di": 3, "Mi": 4, "Do": 5, "Fr": 6}
+                        row = day_to_row[day] + row_offset
+
+                        # Überprüfung, ob Kandidaten für den Schlafendienst verfügbar sind
+                        if schlafen_candidates:
+                            # Wähle den ersten Kandidaten aus der Liste der Schlafendienst-Kandidaten
+                            schlafen_candidate = schlafen_candidates.pop(0)
+                            # Position für den Text im Canvas bestimmen
+                            x_pos = self.cm_to_px(sum(self.COLUMN_WIDTHS_CM[:schlafen_col_index])) + (self.cm_to_px(self.COLUMN_WIDTHS_CM[schlafen_col_index]) / 2)
+                            y_pos = self.cm_to_px(sum(self.ROW_HEIGHTS_CM[:row + 1])) - (self.cm_to_px(self.ROW_HEIGHTS_CM[row]) / 2)
+                            # Erstelle den Text auf dem Canvas
+                            self.dienstplan_canvas.create_text(x_pos, y_pos, text=schlafen_candidate, font=("Arial", 10), tags=("employee_text"))
+
+                # Setze die Liste der verfügbaren Namen zurück für den nächsten Tag
+                availability[day] = available_names_copy
+
+    def save_data(self):
+        data = {
+            "stichtag": self.stichtag_entry.get(),
+            "mitarbeiter": []
+        }
+
+        for idx, name_entry in enumerate(self.name_entries):
+            employee_data = {
+                "name": name_entry.get(),
+                "days": {
+                    day: self.day_entries[day][idx].get() for day in ["Mo", "Di", "Mi", "Do", "Fr"]
+                },
+                "priority": self.day_entries['Priority'][idx].get()  # Verwenden von .get()
+            }
+            data["mitarbeiter"].append(employee_data)
+
+        # Speichern der Daten in einer JSON-Datei
+        with open("dienstplan_data.json", "w") as file:
+            json.dump(data, file)
+        canvas_data = []
+        for item in self.dienstplan_canvas.find_withtag("employee_text"):
+            x, y, text = self.dienstplan_canvas.coords(item)[0], self.dienstplan_canvas.coords(item)[1], self.dienstplan_canvas.itemcget(item, "text")
+            canvas_data.append({"x": x, "y": y, "text": text})
+
+        data["dienstplan_canvas"] = canvas_data
+
+        date_data = []
+        for item in self.dienstplan_canvas.find_withtag("stichtag_text"):
+            x, y, text = self.dienstplan_canvas.coords(item)[0], self.dienstplan_canvas.coords(item)[1], self.dienstplan_canvas.itemcget(item, "text")
+            date_data.append({"x": x, "y": y, "text": text})
+
+        data["dienstplan_dates"] = date_data
+
+        with open("dienstplan_data.json", "w") as file:
+            json.dump(data, file)
+
+
+    def load_data(self):
+        if not os.path.exists("dienstplan_data.json"):
+            return
+
+        with open("dienstplan_data.json", "r") as file:
+            data = json.load(file)
+
+        self.stichtag_entry.delete(0, tk.END)
+        self.stichtag_entry.insert(0, data.get("stichtag", ""))
+
+        while self.name_entries:
+            self.remove_mitarbeiter_row()
+
+        for employee_data in data["mitarbeiter"]:
+            self.add_mitarbeiter_row()
+            self.name_entries[-1].insert(0, employee_data["name"])
+            for day in ["Mo", "Di", "Mi", "Do", "Fr"]:
+                self.day_entries[day][-1].set(employee_data["days"][day])
+            self.day_entries['Priority'][-1].set(employee_data.get("priority", "0"))  # Verwenden von .set() und "0" als Standardwert
+        # Löscht alle Canvas-Textelemente mit dem Tag "employee_text"
+        self.dienstplan_canvas.delete("employee_text")
+
+        canvas_data = data.get("dienstplan_canvas", [])
+        for item in canvas_data:
+            x, y, text = item["x"], item["y"], item["text"]
+            self.dienstplan_canvas.create_text(x, y, text=text, font=("Arial", 10), tags=("employee_text"))
+
+        # Löscht alle Canvas-Textelemente mit dem Tag "stichtag_text"
+        self.dienstplan_canvas.delete("stichtag_text")
+
+        date_data = data.get("dienstplan_dates", [])
+        for item in date_data:
+            x, y, text = item["x"], item["y"], item["text"]
+            self.dienstplan_canvas.create_text(x, y, text=text, font=("Arial", 10), tags=("stichtag_text"))
+
+    def adjust_text_coords(self, coords, line_number):
+        # Passen Sie die Koordinaten von Textelementen an, um sie nach links und nach oben/unten zu verschieben
+        offset_x = -10  # Diesen Wert anpassen, um Textelemente nach links zu verschieben
+        offset_y = 70   # Diesen Wert anpassen, um Textelemente nach oben (negativer Wert) oder unten (positiver Wert) zu verschieben
+
+        # Wenn es die Hauptüberschrift ist, verschieben Sie sie weiter nach oben
+        if line_number == 0:
+            header_offset_y = 100  # Diesen Wert anpassen, um nur die Hauptüberschrift weiter nach oben zu verschieben
+            offset_y += header_offset_y
+
+        return [coords[0] + offset_x, coords[1] + offset_y]
+        
+
+    def adjust_canvas_item_coords(self, coords, scale_factor, offset_x, offset_y, height):
+        # Skalierung der Koordinaten basierend auf dem Skalierungsfaktor und Anpassung der Y-Koordinate
+        adjusted_coords = [(coords[i] if i % 2 == 0 else height - coords[i]) * scale_factor for i in range(len(coords))]
+        # Anwendung der Offsets
+        adjusted_coords = [adjusted_coords[i] + (offset_x if i % 2 == 0 else offset_y) for i in range(len(adjusted_coords))]
+        return adjusted_coords
+
+
+    def get_line_number_of_text(self, item):
+        # Überprüfen Sie die Tags, um die "Zeilennummer" zu bestimmen
+        tags = self.dienstplan_canvas.gettags(item)
+        if "header" in tags:
+            return 0
+        elif "sub_header" in tags:
+            return 1
+        elif "bold" in tags:
+            return 3
+        else:
+            return 2
+
+    def export_to_pdf(self):
+        # Erstellen eines Canvas-Objekts von ReportLab
+        c = canvas.Canvas("dienstplan.pdf", pagesize=landscape(A4))
+        width, height = landscape(A4)  # Breite und Höhe von A4-Papier
+
+        # Skalierungsfaktor, um die Größen anzupassen
+        scale_factor = 0.85  # Sie können diesen Wert anpassen
+
+        # Offset-Werte, um alles nach links und oben zu verschieben
+        offset_x = 0  # Anpassen, um alles nach links zu verschieben
+        offset_y = 75  # Anpassen, um alles nach oben zu verschieben
+
+        # Konstanten für Schriftgrößen
+        MAIN_TITLE_FONT_SIZE = 18  # Beispielwert für Hauptüberschrift
+        SUB_TITLE_FONT_SIZE = 14  # Beispielwert für Spaltenüberschriften
+        NORMAL_FONT_SIZE = 10  # Beispielwert für normalen Text
+        BOLD_FONT_SIZE = 12  # Beispielwert für Fettschrift
+
+        for item in self.dienstplan_canvas.find_all():
+            item_type = self.dienstplan_canvas.type(item)
+            coords = self.dienstplan_canvas.coords(item)
+            
+            if item_type == 'text':
+                coords = self.dienstplan_canvas.coords(item)
+                text = self.dienstplan_canvas.itemcget(item, 'text')
+                line_number = self.get_line_number_of_text(item)
+
+                # Anpassung der Koordinaten und Skalierung für Text, verschieben nach links und oben
+                # Hier rufen wir die adjust_text_coords-Funktion mit line_number als zusätzlichem Argument auf
+                adjusted_coords = self.adjust_text_coords([coords[0] * scale_factor, (height - coords[1]) * scale_factor], line_number)
+
+                 # Schriftgröße und Stil basierend auf der Zeilennummer wählen
+                font_name = "Helvetica"
+                font_size = MAIN_TITLE_FONT_SIZE if line_number == 0 else NORMAL_FONT_SIZE
+
+                # Auswahl der Schriftgröße basierend auf der Zeilennummer
+                if line_number == 0:  # Hauptüberschrift
+                    font_size = MAIN_TITLE_FONT_SIZE
+                elif line_number == 1:  # Spaltenüberschriften
+                    font_size = SUB_TITLE_FONT_SIZE
+                elif line_number == 3:  # Fettdruck für bestimmte Zeiten und Wochentage
+                    font_size = BOLD_FONT_SIZE
+                else:  # Normaler Text
+                    font_size = NORMAL_FONT_SIZE
+
+                # Diagnose: Ausgabe der Werte
+                print(f"Drawing text at: {adjusted_coords}, Font size: {font_size}")
+
+                # Stellen Sie sicher, dass die Farbe des Textes auf Schwarz gesetzt ist
+                c.setFillColor(colors.black)
+                c.setFont(font_name, font_size)
+                c.drawString(adjusted_coords[0], adjusted_coords[1], text)
+
+            else:
+                # Anpassung der Koordinaten für Nicht-Textelemente
+                adjusted_coords = self.adjust_canvas_item_coords(coords, scale_factor, offset_x, offset_y, height)
+
+                if item_type == 'line':
+                        c.line(*adjusted_coords)
+                elif item_type == 'rectangle':
+                        c.rect(*adjusted_coords)
+                # Fügen Sie hier weitere Bedingungen für andere Elementtypen ein, wenn nötig
+
+        # PDF speichern
+        c.save()
+        messagebox.showinfo("PDF Export", "Der Dienstplan wurde erfolgreich als PDF im Querformat gespeichert.")
+
+
+    def on_closing(self):
+        self.save_data()
+        self.root.destroy()
+            
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = MitarbeiterApp(root)
+    root.minsize(500, 300)
+    root.mainloop()
